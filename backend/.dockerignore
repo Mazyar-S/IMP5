@@ -1,0 +1,63 @@
+# Version control and local tooling
+.git
+.gitignore
+.github
+.dockerignore
+.venv/
+venv/
+env/
+ENV/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+docker/secrets/
+
+# Python caches and local build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+build/
+eggs/
+.eggs/
+*.egg
+
+# Test, coverage, and runtime output
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+*.log
+*.sqlite3
+*.sqlite3-journal
+media/
+staticfiles/
+staticfiles_collected/
+
+# Local project files not needed in the image build context
+compose*.yaml
+*.swp
+*.swo
+*~
+
+# Future frontend and Go artifacts
+node_modules/
+.next/
+out/
+dist/
+bin/
+*.test
+coverage.out
+
+.idea
+.vscode
+.DS_Store

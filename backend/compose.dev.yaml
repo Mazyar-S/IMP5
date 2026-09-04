@@ -1,0 +1,136 @@
+name: django-platform-dev
+
+# تعریف الگوهای مشترک برای جلوگیری از تکرار کد (DRY)
+x-django-env: &django-environment
+  DJANGO_SETTINGS_MODULE: config.settings.development
+  DJANGO_SECRET_KEY: dev-only-secret-key
+  DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+  POSTGRES_DB: app_dev
+  POSTGRES_USER: app_dev
+  POSTGRES_PASSWORD: app_dev_password
+  POSTGRES_HOST: db
+  POSTGRES_PORT: "5432"
+  CELERY_BROKER_URL: redis://redis-broker:6379/0
+  CHANNELS_REDIS_URL: redis://redis-channel:6379/0
+
+x-django-volumes: &django-volumes
+  - .:/app
+  - venv_dev:/app/.venv
+  - staticfiles_dev:/app/staticfiles
+  - uv_cache:/root/.cache/uv
+
+services:
+  db:
+    image: postgres:18.6-bookworm
+    environment:
+      POSTGRES_DB: app_dev
+      POSTGRES_USER: app_dev
+      POSTGRES_PASSWORD: app_dev_password
+      PGDATA: /var/lib/postgresql/18/docker
+    volumes:
+      - pgdata_dev:/var/lib/postgresql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis-broker:
+    image: redis:8.10.1-alpine3.23
+    command: ["redis-server", "--appendonly", "no", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis-channel:
+    image: redis:8.10.1-alpine3.23
+    command: ["redis-server", "--appendonly", "no", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    environment:
+      <<: *django-environment
+    command: ["uv", "run", "python", "manage.py", "migrate", "--noinput"]
+    volumes: *django-volumes
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    environment:
+      <<: *django-environment
+    command: ["uv", "run", "python", "manage.py", "runserver", "0.0.0.0:8000"]
+    volumes: *django-volumes
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis-broker:
+        condition: service_healthy
+      redis-channel:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    environment:
+      <<: *django-environment
+    command: ["uv", "run", "celery", "-A", "config", "worker", "--loglevel=INFO", "--concurrency=2"]
+    volumes: *django-volumes
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis-broker:
+        condition: service_healthy
+
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    environment:
+      <<: *django-environment
+    command: [
+      "uv",
+      "run",
+      "celery",
+      "-A",
+      "config",
+      "beat",
+      "--loglevel=INFO",
+      "--scheduler=django_celery_beat.schedulers:DatabaseScheduler"
+    ]
+    volumes: *django-volumes
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis-broker:
+        condition: service_healthy
+
+volumes:
+  pgdata_dev:
+  venv_dev:
+  staticfiles_dev:
+  uv_cache:

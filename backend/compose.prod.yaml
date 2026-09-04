@@ -1,0 +1,226 @@
+name: django-platform-prod
+
+services:
+  db:
+    image: postgres:18.6-bookworm
+
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      PGDATA: /var/lib/postgresql/18/docker
+
+    secrets:
+      - postgres_password
+
+    volumes:
+      - pgdata:/var/lib/postgresql
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+    restart: unless-stopped
+
+  redis-broker:
+    image: redis:8.10.1-alpine3.23
+
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--maxmemory-policy",
+        "noeviction"
+      ]
+
+    volumes:
+      - redis_broker_data:/data
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+    restart: unless-stopped
+
+  redis-channel:
+    image: redis:8.10.1-alpine3.23
+
+    command:
+      [
+        "redis-server",
+        "--save",
+        "",
+        "--appendonly",
+        "no",
+        "--maxmemory-policy",
+        "noeviction"
+      ]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    environment: &django-environment
+      DJANGO_SETTINGS_MODULE: config.settings.production
+      DJANGO_SECRET_KEY_FILE: /run/secrets/django_secret_key
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS}
+      DJANGO_CSRF_TRUSTED_ORIGINS: ${DJANGO_CSRF_TRUSTED_ORIGINS}
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      CELERY_BROKER_URL: redis://redis-broker:6379/0
+      CHANNELS_REDIS_URL: redis://redis-channel:6379/0
+    secrets:
+      - django_secret_key
+      - postgres_password
+    command:
+      [
+        "sh",
+        "-c",
+        "python manage.py migrate --noinput && python manage.py collectstatic --noinput"
+      ]
+    volumes:
+      - staticfiles:/app/staticfiles
+    depends_on:
+      db:
+        condition: service_healthy
+      redis-broker:
+        condition: service_healthy
+      redis-channel:
+        condition: service_healthy
+    restart: "no"
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    environment:
+      <<: *django-environment
+    secrets:
+      - django_secret_key
+      - postgres_password
+    command:
+      [
+        "daphne",
+        "-b",
+        "0.0.0.0",
+        "-p",
+        "8000",
+        "--proxy-headers",
+        "config.asgi:application"
+      ]
+    ports:
+      - "8000:8000"
+    volumes:
+      - staticfiles:/app/staticfiles
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; s=socket.create_connection(('127.0.0.1', 8000), 3); s.close()"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    environment:
+      <<: *django-environment
+    secrets:
+      - django_secret_key
+      - postgres_password
+    command:
+      [
+        "celery",
+        "-A",
+        "config",
+        "worker",
+        "--loglevel=INFO",
+        "--concurrency=2",
+        "--hostname=worker@%h"
+      ]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis-broker:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A config inspect ping --timeout=5"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    environment:
+      <<: *django-environment
+    secrets:
+      - django_secret_key
+      - postgres_password
+    command:
+      [
+        "celery",
+        "-A",
+        "config",
+        "beat",
+        "--loglevel=INFO",
+        "--scheduler=django_celery_beat.schedulers:DatabaseScheduler"
+      ]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis-broker:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redis_broker_data:
+  staticfiles:
+
+secrets:
+  django_secret_key:
+    file: ./docker/secrets/django_secret_key.txt
+  postgres_password:
+    file: ./docker/secrets/postgres_password.txt
